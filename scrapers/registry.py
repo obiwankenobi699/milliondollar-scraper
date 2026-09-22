@@ -16,6 +16,22 @@ SOURCES = [
         "enabled": True,
         "official": True,
     },
+    {
+        "id": "ironman",
+        "name": "IRONMAN",
+        "base_url": "https://www.ironman.com",
+        "parser": "scrapers.ironman.parse",
+        "enabled": True,
+        "official": True,
+    },
+    {
+        "id": "tatamumbai",
+        "name": "Tata Mumbai & Procam",
+        "base_url": "https://tatamumbaimarathon.procam.in",
+        "parser": "scrapers.tatamumbai.parse",
+        "enabled": True,
+        "official": True,
+    },
 ]
 
 def get_enabled():
