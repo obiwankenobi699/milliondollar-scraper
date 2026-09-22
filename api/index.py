@@ -7,6 +7,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from jose import jwt
 from slowapi import Limiter
 from slowapi.util import get_remote_address
+try:
+    from scrapers.image_cache import get_cached, set_cached
+except: 
+    def get_cached(): return None
+    def set_cached(e): pass
 
 ADMIN_HASH = os.environ.get("ADMIN_ACCESS_HASH", "")
 SCRAPER_SECRET = os.environ.get("SCRAPER_SECRET", "")
@@ -78,6 +83,10 @@ async def list_sources(request: Request):
 async def scrape(request: Request, source: str | None = Query(default=None), authorization: str | None = Header(default=None)):
     # allow bearer or dashboard cookie
     require_bearer_or_dashboard(request, authorization)
+    # Upstash cache for full scrape (no source filter) — serves images fast
+    if not source:
+        cached = get_cached()
+        if cached: return {"events": cached, "errors": [], "meta": {"ran": 4, "succeeded": 4, "total_events": len(cached), "cached": True}}
     from scrapers.registry import get_enabled, get_by_id
     from scrapers.base import serialize
     targets = []
@@ -105,10 +114,12 @@ async def scrape(request: Request, source: str | None = Query(default=None), aut
             except Exception as e:
                 errors.append({"source": src["id"], "error": str(e)})
                 LAST_RUN[src["id"]] = {"time": datetime.utcnow().isoformat(), "count": 0, "error": str(e)}
-    # serialize to dicts
+    # serialize to dicts — image_path now absolute scraped URL for card
     from scrapers.base import serialize
     serialized = serialize(events)
-    return {"events": serialized, "errors": errors, "meta": {"ran": len(targets), "succeeded": len(targets)-len(errors), "total_events": len(serialized)}}
+    if not source and not errors:
+        set_cached(serialized)
+    return {"events": serialized, "errors": errors, "meta": {"ran": len(targets), "succeeded": len(targets)-len(errors), "total_events": len(serialized), "images": sum(1 for e in serialized if e.get("image_path"))}}
 
 # Dashboard HTML
 LOGIN_HTML = """<!doctype html><html><head><meta charset=utf-8><title>Scraper Login</title><style>body{font-family:system-ui;padding:40px;max-width:480px;margin:auto}input{width:100%;padding:12px;margin:8px 0}button{padding:12px 20px;background:#000;color:#fff;border:0;cursor:pointer}</style></head><body><h1>Scraper Login</h1><p>Enter 10-digit hash</p><form id=f><input id=hash placeholder=hash><button>Login</button></form><p id=msg></p><script>document.getElementById('f').onsubmit=async e=>{e.preventDefault();const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({hash:document.getElementById('hash').value})});const j=await r.json();if(r.ok)location.href='/dashboard';else document.getElementById('msg').textContent=j.detail||'failed'}</script></body></html>"""
