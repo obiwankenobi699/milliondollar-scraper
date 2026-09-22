@@ -1,6 +1,8 @@
 import httpx
+from dataclasses import replace
 from bs4 import BeautifulSoup
 from .base import NormalizedEvent, slugify
+from .image_resolver import finalize_event_images
 
 # Official HYROX events page — parse listing
 # Fallback to mock if official blocks (returns mock to prove serializer works)
@@ -65,9 +67,10 @@ MOCK_EVENTS = [
 async def parse(client: httpx.AsyncClient | None = None) -> list[NormalizedEvent]:
     _client = client or httpx.AsyncClient(timeout=10, follow_redirects=True, headers={"User-Agent":"WearbidsScraper/1.0"})
     close = client is None
+    page_url = "https://hyrox.com/find-my-race/"
     try:
         try:
-            resp = await _client.get("https://hyrox.com/find-my-race/", timeout=10)
+            resp = await _client.get(page_url, timeout=10)
             if resp.status_code == 200 and "hyrox" in resp.text.lower():
                 soup = BeautifulSoup(resp.text, "lxml")
                 # Best-effort image scrape: collect <img> with hyrox/event in src/alt for card
@@ -83,12 +86,16 @@ async def parse(client: httpx.AsyncClient | None = None) -> list[NormalizedEvent
                             enriched.append(NormalizedEvent(**{**ev.__dict__, "image_path": scraped}))
                         else:
                             enriched.append(ev)
-                    return enriched
-                return MOCK_EVENTS
+                    # page_fallback=False: listing images are mapped per-event, so a
+                    # generic page image on every card would look worse than none.
+                    # Every image_path is validated; failures become None (clean
+                    # placeholder in admin) instead of a broken-image icon.
+                    return await finalize_event_images(enriched, soup, page_url, client=_client, source_name="hyrox", page_fallback=False)
+                return await finalize_event_images([replace(ev) for ev in MOCK_EVENTS], soup, page_url, client=_client, source_name="hyrox", page_fallback=False)
             else:
-                return MOCK_EVENTS
+                return await finalize_event_images([replace(ev) for ev in MOCK_EVENTS], None, page_url, client=_client, source_name="hyrox", page_fallback=False)
         except Exception:
-            return MOCK_EVENTS
+            return await finalize_event_images([replace(ev) for ev in MOCK_EVENTS], None, page_url, client=_client, source_name="hyrox", page_fallback=False)
     finally:
         if close:
             await _client.aclose()

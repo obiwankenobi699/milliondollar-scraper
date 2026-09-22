@@ -1,5 +1,8 @@
 import httpx
+from dataclasses import replace
+from bs4 import BeautifulSoup
 from .base import NormalizedEvent
+from .image_resolver import finalize_event_images
 
 MOCK = [
     NormalizedEvent(
@@ -38,9 +41,14 @@ MOCK = [
 ]
 
 async def parse(client: httpx.AsyncClient | None = None) -> list[NormalizedEvent]:
+    # Curated Procam events; every image_path is validated (failures become
+    # None, never a broken link).
+    page_url = "https://tatamumbaimarathon.procam.in"
+    soup = None
     if client:
         try:
-            resp = await client.get("https://tatamumbaimarathon.procam.in", timeout=10)
-            # image scraping would extract hero <img> here
+            resp = await client.get(page_url, timeout=10)
+            if resp.status_code == 200:
+                soup = BeautifulSoup(resp.text, "lxml")
         except: pass
-    return MOCK
+    return await finalize_event_images([replace(ev) for ev in MOCK], soup, page_url, client=client, source_name="tatamumbai")

@@ -1,5 +1,8 @@
 import httpx
+from dataclasses import replace
+from bs4 import BeautifulSoup
 from .base import NormalizedEvent
+from .image_resolver import finalize_event_images
 
 MOCK = [
     NormalizedEvent(
@@ -27,13 +30,14 @@ MOCK = [
 ]
 
 async def parse(client: httpx.AsyncClient | None = None) -> list[NormalizedEvent]:
-    # Official https://www.ironman.com/races — image scraping would parse <img> on race pages
-    # For now return curated official events with absolute hero images for cards
+    # Official https://www.ironman.com/races — curated official events; every
+    # image_path is validated (failures become None, never a broken link).
+    page_url = "https://www.ironman.com/races"
+    soup = None
     if client:
         try:
-            resp = await client.get("https://www.ironman.com/races", timeout=10)
+            resp = await client.get(page_url, timeout=10)
             if resp.status_code == 200:
-                # best-effort image scrape could go here; keeping mock enriched
-                pass
+                soup = BeautifulSoup(resp.text, "lxml")
         except: pass
-    return MOCK
+    return await finalize_event_images([replace(ev) for ev in MOCK], soup, page_url, client=client, source_name="ironman")
