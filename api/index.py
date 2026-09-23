@@ -1,4 +1,4 @@
-import os, hmac, time, importlib, asyncio
+import os, hmac, importlib, asyncio
 from datetime import datetime, timedelta
 import httpx
 from fastapi import FastAPI, Request, Header, Query, HTTPException, Depends
@@ -13,10 +13,17 @@ except:
     def get_cached(): return None
     def set_cached(e): pass
 
-ADMIN_HASH = os.environ.get("ADMIN_ACCESS_HASH", "")
-SCRAPER_SECRET = os.environ.get("SCRAPER_SECRET", "")
-JWT_SECRET = os.environ.get("JWT_SECRET", "dev-jwt-secret")
+ADMIN_HASH = os.environ.get("ADMIN_ACCESS_HASH", "").strip()
+SCRAPER_SECRET = os.environ.get("SCRAPER_SECRET", "").strip()
+JWT_SECRET = os.environ.get("JWT_SECRET", "").strip()
 JWT_ALGO = "HS256"
+IS_PROD = bool(os.environ.get("VERCEL") or os.environ.get("PRODUCTION"))
+COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "1" if IS_PROD else "0") == "1"
+CORS_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get("CORS_ALLOWED_ORIGINS", os.environ.get("APP_ORIGIN", "")).split(",")
+    if origin.strip()
+]
 
 limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="milliondollar-scraper")
@@ -25,18 +32,36 @@ app.state.limiter = limiter
 # in-memory last run
 LAST_RUN: dict = {}
 
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ALLOWED_ORIGINS or [],
+    allow_credentials=True,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Authorization", "Content-Type"],
+)
+
+def require_auth_config():
+    missing = [name for name, value in (
+        ("ADMIN_ACCESS_HASH", ADMIN_HASH),
+        ("SCRAPER_SECRET", SCRAPER_SECRET),
+        ("JWT_SECRET", JWT_SECRET),
+    ) if not value]
+    if missing:
+        raise HTTPException(status_code=503, detail=f"missing auth config: {', '.join(missing)}")
 
 def create_session_token():
+    require_auth_config()
     exp = datetime.utcnow() + timedelta(hours=12)
     return jwt.encode({"sub":"admin","exp":exp}, JWT_SECRET, algorithm=JWT_ALGO)
 
 def verify_session(request: Request) -> bool:
+    if not JWT_SECRET:
+        return False
     token = request.cookies.get("scraper_session")
     if not token: return False
     try:
-        jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
-        return True
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
+        return payload.get("sub") == "admin"
     except: return False
 
 def require_dashboard(request: Request):
@@ -45,7 +70,8 @@ def require_dashboard(request: Request):
 
 def require_bearer_or_dashboard(request: Request, authorization: str | None = Header(default=None)):
     # allow either bearer or dashboard cookie
-    if authorization and authorization == f"Bearer {SCRAPER_SECRET}" and SCRAPER_SECRET:
+    expected = f"Bearer {SCRAPER_SECRET}"
+    if authorization and SCRAPER_SECRET and hmac.compare_digest(authorization, expected):
         return True
     if verify_session(request):
         return True
@@ -58,6 +84,7 @@ async def health():
 @app.post("/api/login")
 @limiter.limit("5/15 minutes")
 async def login(request: Request):
+    require_auth_config()
     body = await request.json()
     provided = str(body.get("hash","")).strip()
     # constant-time compare
@@ -65,7 +92,7 @@ async def login(request: Request):
         raise HTTPException(status_code=401, detail="invalid hash")
     token = create_session_token()
     resp = JSONResponse({"ok": True})
-    resp.set_cookie("scraper_session", token, httponly=True, secure=False, samesite="lax", max_age=43200, path="/")
+    resp.set_cookie("scraper_session", token, httponly=True, secure=COOKIE_SECURE, samesite="lax", max_age=43200, path="/")
     return resp
 
 @app.get("/api/sources")
@@ -80,40 +107,62 @@ async def list_sources(request: Request):
     return {"sources": out}
 
 @app.get("/api/scrape")
-async def scrape(request: Request, source: str | None = Query(default=None), authorization: str | None = Header(default=None)):
+async def scrape(
+    request: Request,
+    source: str | None = Query(default=None),
+    refresh: bool = Query(default=False),
+    authorization: str | None = Header(default=None),
+):
     # allow bearer or dashboard cookie
     require_bearer_or_dashboard(request, authorization)
-    # Upstash cache for full scrape (no source filter) — serves images fast
-    if not source:
-        cached = get_cached()
-        if cached: return {"events": cached, "errors": [], "meta": {"ran": 4, "succeeded": 4, "total_events": len(cached), "cached": True}}
     from scrapers.registry import get_enabled, get_by_id
     from scrapers.base import serialize
-    targets = []
-    if source:
-        s = get_by_id(source)
-        if not s: raise HTTPException(status_code=404, detail="source not found")
-        if not s["official"]: raise HTTPException(status_code=400, detail="only official sources allowed")
-        targets = [s]
-    else:
-        targets = get_enabled()
+
+    targets = [get_by_id(source)] if source else get_enabled()
+    targets = [s for s in targets if s]
+    if source and not targets:
+        raise HTTPException(status_code=404, detail="source not found")
+    if any(not s["official"] for s in targets):
+        raise HTTPException(status_code=400, detail="only official sources allowed")
+
+    # Upstash cache for full scrape (no source filter). Admin-triggered POSTs can
+    # pass refresh=1 to force fresh official data and avoid repeated stale output.
+    if not source and not refresh:
+        cached = get_cached()
+        if cached:
+            return {
+                "events": cached,
+                "errors": [],
+                "meta": {
+                    "ran": len(targets),
+                    "succeeded": len(targets),
+                    "total_events": len(cached),
+                    "images": sum(1 for e in cached if e.get("image_path")),
+                    "cached": True,
+                },
+            }
 
     events = []
     errors = []
     async with httpx.AsyncClient(timeout=10, follow_redirects=True, headers={"User-Agent":"WearbidsScraper/1.0"}) as client:
-        for src in targets:
+        async def run_source(src):
             try:
                 mod_path, func_name = src["parser"].rsplit(".",1)
                 mod = importlib.import_module(mod_path)
                 func = getattr(mod, func_name)
-                # pass client
                 result = await func(client)
-                # result is list[NormalizedEvent]
-                events.extend([e for e in result])
                 LAST_RUN[src["id"]] = {"time": datetime.utcnow().isoformat(), "count": len(result), "error": None}
+                return src, result, None
             except Exception as e:
-                errors.append({"source": src["id"], "error": str(e)})
                 LAST_RUN[src["id"]] = {"time": datetime.utcnow().isoformat(), "count": 0, "error": str(e)}
+                return src, [], e
+
+        results = await asyncio.gather(*(run_source(src) for src in targets))
+        for src, result, error in results:
+            if error:
+                errors.append({"source": src["id"], "error": str(error)})
+            events.extend(result)
+
     # serialize to dicts — image_path now absolute scraped URL for card
     from scrapers.base import serialize
     serialized = serialize(events)

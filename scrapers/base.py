@@ -1,4 +1,5 @@
 from dataclasses import dataclass, asdict
+import os
 import re
 from datetime import date
 
@@ -41,3 +42,6 @@ def parse_date(s: str | None) -> str | None:
 
 def serialize(events: list[NormalizedEvent]) -> list[dict]:
     return [asdict(e) for e in events]
+
+def allow_curated_fallbacks() -> bool:
+    return os.environ.get("ALLOW_CURATED_FALLBACKS", "0") == "1"

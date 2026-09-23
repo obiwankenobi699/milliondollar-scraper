@@ -1,10 +1,10 @@
 import httpx
 from dataclasses import replace
 from bs4 import BeautifulSoup
-from .base import NormalizedEvent
+from .base import NormalizedEvent, allow_curated_fallbacks
 from .image_resolver import finalize_event_images
 
-MOCK = [
+CURATED_FALLBACKS = [
     NormalizedEvent(
         slug="ironman-703-goa",
         name="IRONMAN 70.3 Goa",
@@ -32,6 +32,8 @@ MOCK = [
 async def parse(client: httpx.AsyncClient | None = None) -> list[NormalizedEvent]:
     # Official https://www.ironman.com/races — curated official events; every
     # image_path is validated (failures become None, never a broken link).
+    if not allow_curated_fallbacks():
+        return []
     page_url = "https://www.ironman.com/races"
     soup = None
     if client:
@@ -40,4 +42,4 @@ async def parse(client: httpx.AsyncClient | None = None) -> list[NormalizedEvent
             if resp.status_code == 200:
                 soup = BeautifulSoup(resp.text, "lxml")
         except: pass
-    return await finalize_event_images([replace(ev) for ev in MOCK], soup, page_url, client=client, source_name="ironman")
+    return await finalize_event_images([replace(ev) for ev in CURATED_FALLBACKS], soup, page_url, client=client, source_name="ironman")

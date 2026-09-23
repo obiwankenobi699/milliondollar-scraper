@@ -5,16 +5,25 @@ try:
 except: redis = None
 
 CACHE_KEY = "scraper:events"
-TTL = 3600  # 1h
+TTL = int(os.environ.get("SCRAPER_CACHE_TTL_SECONDS", "1800"))
 
 def get_cached():
     if not redis: return None
     try:
         v = redis.get(CACHE_KEY)
-        return json.loads(v) if v else None
-    except: return None
+        if not v:
+            return None
+        if isinstance(v, str):
+            return json.loads(v)
+        if isinstance(v, list):
+            return v
+        if isinstance(v, dict):
+            return v.get("events") if isinstance(v.get("events"), list) else None
+        return None
+    except Exception:
+        return None
 
 def set_cached(events: list[dict]):
     if not redis: return
     try: redis.set(CACHE_KEY, json.dumps(events), ex=TTL)
-    except: pass
+    except Exception: pass

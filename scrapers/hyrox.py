@@ -1,12 +1,12 @@
 import httpx
 from dataclasses import replace
 from bs4 import BeautifulSoup
-from .base import NormalizedEvent, slugify
+from .base import NormalizedEvent, allow_curated_fallbacks
 from .image_resolver import finalize_event_images
 
 # Official HYROX events page — parse listing
-# Fallback to mock if official blocks (returns mock to prove serializer works)
-MOCK_EVENTS = [
+# Optional curated fallback if official blocks (disabled by default in prod).
+CURATED_FALLBACKS = [
     NormalizedEvent(
         slug="hyrox-mumbai",
         name="Masters' Union HYROX Mumbai",
@@ -78,8 +78,10 @@ async def parse(client: httpx.AsyncClient | None = None) -> list[NormalizedEvent
                 # Use absolute URLs if found, otherwise fallback mock covers images
                 # If we found at least 3 images, map them to mock events for richer payload
                 if len(imgs) >= 3:
+                    if not allow_curated_fallbacks():
+                        return []
                     enriched = []
-                    for i, ev in enumerate(MOCK_EVENTS):
+                    for i, ev in enumerate(CURATED_FALLBACKS):
                         # Use scraped img if absolute, else keep mock absolute
                         scraped = imgs[i % len(imgs)]
                         if scraped.startswith("http"):
@@ -91,11 +93,17 @@ async def parse(client: httpx.AsyncClient | None = None) -> list[NormalizedEvent
                     # Every image_path is validated; failures become None (clean
                     # placeholder in admin) instead of a broken-image icon.
                     return await finalize_event_images(enriched, soup, page_url, client=_client, source_name="hyrox", page_fallback=False)
-                return await finalize_event_images([replace(ev) for ev in MOCK_EVENTS], soup, page_url, client=_client, source_name="hyrox", page_fallback=False)
+                if not allow_curated_fallbacks():
+                    return []
+                return await finalize_event_images([replace(ev) for ev in CURATED_FALLBACKS], soup, page_url, client=_client, source_name="hyrox", page_fallback=False)
             else:
-                return await finalize_event_images([replace(ev) for ev in MOCK_EVENTS], None, page_url, client=_client, source_name="hyrox", page_fallback=False)
+                if not allow_curated_fallbacks():
+                    return []
+                return await finalize_event_images([replace(ev) for ev in CURATED_FALLBACKS], None, page_url, client=_client, source_name="hyrox", page_fallback=False)
         except Exception:
-            return await finalize_event_images([replace(ev) for ev in MOCK_EVENTS], None, page_url, client=_client, source_name="hyrox", page_fallback=False)
+            if not allow_curated_fallbacks():
+                return []
+            return await finalize_event_images([replace(ev) for ev in CURATED_FALLBACKS], None, page_url, client=_client, source_name="hyrox", page_fallback=False)
     finally:
         if close:
             await _client.aclose()

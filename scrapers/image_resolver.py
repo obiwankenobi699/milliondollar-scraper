@@ -15,7 +15,9 @@ This module only returns a URL or None — it never touches the database.
 """
 
 import asyncio
+import hashlib
 import logging
+import os
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -36,6 +38,7 @@ BROWSER_UA = (
 VALIDATE_TIMEOUT = 8.0
 MIN_IMAGE_BYTES = 3000  # filters 1x1 tracking pixels that slip past filename checks
 MAX_VALIDATION_CONCURRENCY = 5
+UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY", "").strip()
 
 _sem = asyncio.Semaphore(MAX_VALIDATION_CONCURRENCY)
 
@@ -247,6 +250,54 @@ async def resolve_event_image(
     return None
 
 
+def _event_search_query(ev: object) -> str:
+    parts = [
+        getattr(ev, "name", ""),
+        getattr(ev, "city", ""),
+        getattr(ev, "category", ""),
+        "event",
+    ]
+    return " ".join(str(p).strip() for p in parts if str(p).strip())
+
+
+async def resolve_unsplash_image(ev: object, client: httpx.AsyncClient) -> str | None:
+    """Optional generic fallback when official sources do not expose an image.
+
+    Requires UNSPLASH_ACCESS_KEY. Official source images always win; this is only
+    to keep admin review cards visual instead of blank when a source blocks or
+    omits event media.
+    """
+    if not UNSPLASH_ACCESS_KEY:
+        return None
+    query = _event_search_query(ev)
+    if not query:
+        return None
+    try:
+        resp = await client.get(
+            "https://api.unsplash.com/search/photos",
+            headers={"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"},
+            params={
+                "query": query,
+                "per_page": 10,
+                "orientation": "landscape",
+                "content_filter": "high",
+            },
+            timeout=VALIDATE_TIMEOUT,
+        )
+        if resp.status_code != 200:
+            return None
+        results = (resp.json().get("results") or [])
+        if not results:
+            return None
+        seed = getattr(ev, "slug", query)
+        idx = int(hashlib.sha256(str(seed).encode()).hexdigest(), 16) % len(results)
+        urls = results[idx].get("urls") or {}
+        return urls.get("regular") or urls.get("small") or urls.get("raw")
+    except Exception:
+        log.debug("unsplash fallback failed for %s", query, exc_info=True)
+        return None
+
+
 async def finalize_event_images(
     events: list,
     soup: BeautifulSoup | None = None,
@@ -255,6 +306,7 @@ async def finalize_event_images(
     client: httpx.AsyncClient | None = None,
     source_name: str = "",
     page_fallback: bool = True,
+    unsplash_fallback: bool = True,
 ) -> list:
     """Validate every event's ``image_path``; fill gaps via page-level resolve.
 
@@ -278,6 +330,8 @@ async def finalize_event_images(
                     page_tried = True
                     page_image = await resolve_event_image(soup, page_url, source_selector, client, source_name)
                 ev.image_path = page_image
+            if not ev.image_path and unsplash_fallback:
+                ev.image_path = await resolve_unsplash_image(ev, client)
     finally:
         if own_client:
             await client.aclose()
