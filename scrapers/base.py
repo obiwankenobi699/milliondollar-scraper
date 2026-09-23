@@ -44,4 +44,4 @@ def serialize(events: list[NormalizedEvent]) -> list[dict]:
     return [asdict(e) for e in events]
 
 def allow_curated_fallbacks() -> bool:
-    return os.environ.get("ALLOW_CURATED_FALLBACKS", "0") == "1"
+    return os.environ.get("ALLOW_CURATED_FALLBACKS", "1") != "0"
