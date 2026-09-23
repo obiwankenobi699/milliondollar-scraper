@@ -5,8 +5,7 @@ all returned ``image_path`` values are *validated* absolute URLs — never a gue
 that 404s and renders as a broken-image icon in the admin dashboard.
 
 Strategy order per event (first validated win):
-  1. ``og_meta``     — Open Graph / Twitter Card / JSON-LD / microdata image fields
-                       (via ``extruct``, with a hand-parsed meta-tag fallback).
+  1. ``og_meta``     — Open Graph / Twitter Card image fields.
   2. ``selector``     — source-specific CSS selector passed in by the calling parser.
   3. ``fallback_img`` — scan of all <img> tags, skipping chrome (logos, icons, …).
   4. ``none``         — nothing validated; caller must store ``image_path = None``.
@@ -22,11 +21,6 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
-
-try:
-    import extruct  # type: ignore
-except ImportError:  # pragma: no cover - deploy installs it via requirements.txt
-    extruct = None  # type: ignore
 
 log = logging.getLogger("image_resolver")
 
@@ -133,7 +127,7 @@ def _verdict(url: str, status: int, headers: httpx.Headers, ranged: bool = False
 
 
 def _meta_candidates(soup: BeautifulSoup, raw_html: str | None) -> list[str]:
-    """og_meta strategy: extruct first (OG + Twitter + JSON-LD + microdata)."""
+    """og_meta strategy: hand-parsed Open Graph and Twitter Card image tags."""
     found: list[str] = []
 
     def _add(value: object) -> None:
@@ -142,18 +136,7 @@ def _meta_candidates(soup: BeautifulSoup, raw_html: str | None) -> list[str]:
             if isinstance(v, str) and v.strip() and v.strip() not in found:
                 found.append(v.strip())
 
-    if extruct is not None and raw_html:
-        try:
-            data = extruct.extract(raw_html, syntaxes=["opengraph", "json-ld", "microdata"])
-            for item in data.get("opengraph", []) or []:
-                props = item.get("properties", {}) if isinstance(item, dict) else {}
-                for key in ("image:secure_url", "image"):
-                    _add(props.get(key))
-            for blob in (data.get("json-ld", []) or []) + (data.get("microdata", []) or []):
-                _add(_deep_find_image(blob))
-        except Exception:
-            log.debug("extruct parse failed, falling back to meta tags", exc_info=True)
-    # hand-parsed tags (covers twitter:image which extruct skips, plus no-extruct installs)
+    _ = raw_html
     for attr in (
         ("property", "og:image:secure_url"),
         ("property", "og:image"),
@@ -163,23 +146,6 @@ def _meta_candidates(soup: BeautifulSoup, raw_html: str | None) -> list[str]:
         if tag:
             _add(tag.get("content", ""))
     return found
-
-
-def _deep_find_image(node: object) -> str | None:
-    if isinstance(node, dict):
-        image = node.get("image")
-        if isinstance(image, str) and image.strip():
-            return image.strip()
-        for value in node.values():
-            found = _deep_find_image(value)
-            if found:
-                return found
-    elif isinstance(node, list):
-        for value in node:
-            found = _deep_find_image(value)
-            if found:
-                return found
-    return None
 
 
 def _selector_candidates(soup: BeautifulSoup, selector: str) -> list[str]:
